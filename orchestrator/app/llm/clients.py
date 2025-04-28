@@ -8,7 +8,9 @@ logger = logging.getLogger(__name__)
 
 class LLMClient:
     def __init__(self, settings):
-        backend = settings.LLM_BACKEND.lower()
+        # strip out any inline comments or stray whitespace
+        raw = settings.LLM_BACKEND.split("#", 1)[0].strip()
+        backend = raw.lower()
         if backend == "openai":
             from openai import OpenAI
             self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
