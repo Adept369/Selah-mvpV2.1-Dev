@@ -24,8 +24,24 @@ class MasterAgent:
         return "generic"
 
     def parse(self, text: str) -> Tuple[str, str]:
-        """Returns (agent_key, query_text)."""
-        return self.classify_intent(text), text
+        """
+        Returns (agent_key, query_text).
+
+        - If text starts with a slash, the first token (without slash) is taken
+          as the agent_key and the rest as the query.
+        - Otherwise, falls back to rule‐based classification.
+        """
+        text = text.strip()
+        if text.startswith("/"):
+            parts = text[1:].split(maxsplit=1)
+            cmd = parts[0]
+            query = parts[1] if len(parts) > 1 else ""
+            logger.info("MasterAgent: detected slash-command '%s' → %r", cmd, query)
+            return cmd, query
+
+        # no slash-command → use keyword intent
+        agent_key = self.classify_intent(text)
+        return agent_key, text
 
     async def run(self, update: dict) -> str:
         msg = update.get("message", {})
@@ -36,23 +52,27 @@ class MasterAgent:
         agent_key, query = self.parse(text)
         logger.info("MasterAgent: routing to '%s' for %r", agent_key, query)
 
+        # If we have a specialized agent registered, use it...
         if agent_key in self.registry:
-            # use your specialized agent
             agent = self.registry[agent_key]
-            result = agent.run(query)
-            if hasattr(result, "__await__"):
-                result = await result
+            try:
+                result = agent.run(query)
+                if hasattr(result, "__await__"):
+                    result = await result
+            except Exception:
+                logger.exception("Error in agent %s", agent_key)
+                return "⚠️ Oops, something went wrong in that agent."
 
         else:
-            # generic LLM fallback
+            # unknown slash-command or no specialized handler → generic LLM fallback
             prompt = f"Answer this question as concisely and authoritatively as you can:\n\n{query}"
             try:
                 result = self.llm.generate(prompt, max_tokens=500)
-            except Exception as e:
+            except Exception:
                 logger.exception("LLM fallback failed")
                 return "⚠️ Sorry, I wasn’t able to fetch an answer."
 
-        # for legal queries, we still prepend a one-liner summary
+        # for legal queries, prepend a witty one-liner summary
         if agent_key == "case_law_scholar" and result:
             summary_prompt = (
                 "In a single witty sentence, summarize this legal explanation for Telegram:\n\n"
