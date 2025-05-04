@@ -3,7 +3,6 @@
 import logging
 import os
 import tempfile
-from pathlib import Path
 
 from fastapi import FastAPI, Request, Header, HTTPException
 from telegram import Bot
@@ -14,15 +13,17 @@ from app.core.config import settings
 from app.orchestration.master_agent import MasterAgent
 from app.llm.clients import LLMClient
 from app.agents.file_conversion_agent.file_conversion_agent import FileConversionAgent
+from app.agents.memory.buffer_memory import BufferMemory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# — Initialize clients & agents —
+# — Initialize Telegram, LLM, Agents, and in-memory buffer —
 bot = Bot(token=settings.TELEGRAM_TOKEN)
 llm_client = LLMClient(settings)
 master = MasterAgent(llm_client=llm_client)
 audio_agent = FileConversionAgent(llm_client=None)  # only uses audio_to_text()
+memory = BufferMemory()
 
 app = FastAPI()
 
@@ -43,7 +44,7 @@ async def telegram_webhook(
     if settings.WEBHOOK_SECRET and secret != settings.WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    # 2) Parse update
+    # 2) Parse update JSON
     try:
         update = await request.json()
     except Exception:
@@ -55,77 +56,74 @@ async def telegram_webhook(
 
     chat_id = msg["chat"]["id"]
 
-    # 3) Handle voice vs text
+    # 3) Voice vs text
     if msg.get("voice") or msg.get("audio"):
         file_id = (msg.get("voice") or msg.get("audio"))["file_id"]
-        # fetch and download the .oga/.ogg file
         tg_file = await bot.get_file(file_id)
         tmp = tempfile.NamedTemporaryFile(suffix=".oga", delete=False)
         await tg_file.download(custom_path=tmp.name)
         tmp.close()
 
-        # now let our agent handle it
         try:
             user_input = audio_agent.audio_to_text(tmp.name)
         except Exception as e:
             logger.error("Audio agent error: %s", e)
             user_input = f"⚠️ Audio processing failed: {e}"
 
-        # and send back the transcript
+        # immediately reply with transcript
         try:
             await bot.send_message(chat_id=chat_id, text=user_input)
         except TelegramError as e:
             logger.error("Telegram send_message failed: %s", e)
+        finally:
+            os.unlink(tmp.name)
 
-        # we're done for voice
-        os.unlink(tmp.name)
         return {"status": "ok", "voice_transcript": user_input}
 
-    # 4) Route the (possibly-transcribed) text through MasterAgent
-    fake_update = {"message": {"chat": {"id": chat_id}, "text": user_input}}
+    # 4) It’s text
+    user_input = msg.get("text", "").strip()
+    if not user_input:
+        return {"status": "ok", "reply": "🤖 Please send some text."}
+
+    # 5) Save to in-memory buffer
+    memory.add(chat_id, "user", user_input)
+
+    # 6) Route through MasterAgent
+    #    MasterAgent.run will pick up buffer via Redis or in-memory as configured
+    fake_update = {
+        "message": {"chat": {"id": chat_id}, "text": user_input}
+    }
     reply_text = await master.run(fake_update)
 
-    # 5) Generate a short, witty one-liner about the user_input
-    witty = None
-    if user_input:
-        try:
-            witty = llm_client.generate(
-                prompt=f"Give me a short, witty one-liner about: {user_input}",
-                max_tokens=50,
-                temperature=0.8
-            ).strip()
-            logger.info("Witty line: %r", witty)
-        except Exception as e:
-            logger.error("Failed to generate witty line: %s", e)
+    # 7) Save bot reply in buffer
+    memory.add(chat_id, "bot", reply_text)
 
-    
-    
-
-
-    # 6a) Send the full answer back as text
+    # 8) Send the full-text reply
     if reply_text:
         try:
             await bot.send_message(chat_id=chat_id, text=reply_text)
         except TelegramError as e:
             logger.error("Failed to send text reply: %s", e)
 
-    # 6b) If we have a witty line, TTS it and send as voice note
-    if witty:
-        mp3_file = None
-        try:
-            tts = gTTS(witty)
-            mp3_file = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-            tts.write_to_fp(mp3_file)
-            mp3_file.flush()
-            mp3_file.close()
+    # 9) (Optional) Send a witty TTS voice-note
+    try:
+        witty = llm_client.generate(
+            prompt=f"Give me a short, witty one-liner about: {user_input}",
+            max_tokens=50,
+            temperature=0.8
+        ).strip()
+        tts = gTTS(witty)
+        mp3 = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tts.write_to_fp(mp3)
+        mp3.flush()
+        mp3.close()
+        with open(mp3.name, "rb") as f:
+            await bot.send_voice(chat_id=chat_id, voice=f)
+    except Exception:
+        # swallow any errors here
+        pass
+    finally:
+        if 'mp3' in locals() and os.path.exists(mp3.name):
+            os.unlink(mp3.name)
 
-            with open(mp3_file.name, "rb") as f:
-                await bot.send_voice(chat_id=chat_id, voice=f)
-        except Exception as e:
-            logger.error("Failed to send witty voice note: %s", e)
-        finally:
-            if mp3_file and os.path.exists(mp3_file.name):
-                os.unlink(mp3_file.name)
-
-    # 7) Always return non-null JSON
-    return {"status": "ok", "reply": reply_text, "witty": witty}
+    return {"status": "ok", "reply": reply_text}

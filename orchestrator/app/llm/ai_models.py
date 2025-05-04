@@ -32,7 +32,7 @@ class OpenAIModel(AIModel):
                  model_name: str = None):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         openai.api_key = self.api_key
-        self.model_name = model_name or os.environ.get("OPENAI_MODEL_NAME", "gpt-3.5-turbo")
+        self.model_name = model_name or os.environ.get("OPENAI_MODEL_NAME", "gpt-4.1-mini")
 
     async def generate(self, prompt: str) -> str:
         resp = await openai.ChatCompletion.acreate(

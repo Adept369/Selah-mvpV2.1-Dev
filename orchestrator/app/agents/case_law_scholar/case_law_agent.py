@@ -44,4 +44,4 @@ class CaseLawScholarAgent:
         # Example prompt—customize as needed
         prompt = f"Research and summarize tribal sovereignty law: {query}"
         # generate() is your LLM interface; adjust call signature as required
-        return self.llm.generate(prompt, max_tokens=500)
+        return self.llm.generate(prompt, max_tokens=5000)

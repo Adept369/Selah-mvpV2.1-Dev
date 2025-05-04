@@ -40,4 +40,4 @@ class MemoDrafterAgent:
     def run(self, query: str) -> str:
         # TODO: implement your memo‐draft logic using self.index and self.llm
         prompt = f"Draft a professional memo based on: {query}"
-        return self.llm.generate(prompt, max_tokens=500)
+        return self.llm.generate(prompt, max_tokens=5000)

@@ -21,3 +21,5 @@ pydub
 SpeechRecognition 
 pandas
 gTTS
+redis
+redis[async]
